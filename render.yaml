@@ -9,7 +9,7 @@ services:
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:
-      - key: DATABASE_URL
+      - key: SUPABASE_DB_PASSWORD
         sync: false
       - key: ALLOWED_ORIGINS
         value: https://amirmarat27-cmyk.github.io,http://127.0.0.1:8000,http://localhost:8000

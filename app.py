@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
+from urllib.parse import quote
 
 from flask import Flask, g, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -17,7 +18,20 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 
 ROOT = Path(__file__).resolve().parent
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///research_grants.db")
+SUPABASE_PROJECT_REF = os.environ.get("SUPABASE_PROJECT_REF", "cddfrdcjenmmtwyluiaf")
+SUPABASE_DB_HOST = os.environ.get("SUPABASE_DB_HOST", "aws-1-eu-central-1.pooler.supabase.com")
+SUPABASE_DB_USER = os.environ.get("SUPABASE_DB_USER", f"postgres.{SUPABASE_PROJECT_REF}")
+SUPABASE_DB_PORT = os.environ.get("SUPABASE_DB_PORT", "5432")
+SUPABASE_DB_PASSWORD = os.environ.get("SUPABASE_DB_PASSWORD")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL and SUPABASE_DB_PASSWORD:
+    user = quote(SUPABASE_DB_USER, safe="")
+    password = quote(SUPABASE_DB_PASSWORD, safe="")
+    DATABASE_URL = (
+        f"postgresql://{user}:{password}@{SUPABASE_DB_HOST}:{SUPABASE_DB_PORT}/postgres?sslmode=require"
+    )
+if not DATABASE_URL:
+    DATABASE_URL = "sqlite:///research_grants.db"
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://", 1)
