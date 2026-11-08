@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: research-grant-api
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://amirmarat27-cmyk.github.io,http://127.0.0.1:8000,http://localhost:8000
