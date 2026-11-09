@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from functools import wraps
@@ -69,7 +70,7 @@ def open_connection():
     import psycopg
     from psycopg.rows import dict_row
 
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
 
 
 @contextmanager
@@ -136,7 +137,28 @@ def initialize_database():
             conn.execute(statement)
 
 
-initialize_database()
+_database_ready = False
+_database_lock = threading.Lock()
+
+
+def ensure_database():
+    global _database_ready
+    if _database_ready:
+        return
+    with _database_lock:
+        if not _database_ready:
+            initialize_database()
+            _database_ready = True
+
+
+@app.before_request
+def initialize_database_on_demand():
+    if request.path.startswith("/api/") and request.path != "/api/health":
+        try:
+            ensure_database()
+        except Exception:
+            app.logger.exception("Database initialization failed")
+            return api_error("База данных недоступна. Проверьте конфигурацию подключения.", 503)
 
 
 def now_ms():
