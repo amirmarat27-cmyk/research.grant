@@ -294,7 +294,7 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "storage": "sqlite" if IS_SQLITE else "postgres"})
 
 
 @app.post("/api/auth/register")
