@@ -1,0 +1,10 @@
+{
+    "files.exclude": {
+        "**/.git": true,
+        "**/.venv": true,
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "**/*.db": true,
+        "**/instance": true
+    }
+}

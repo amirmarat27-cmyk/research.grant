@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from datetime import date
 from functools import wraps
 from pathlib import Path
 from urllib.parse import quote
@@ -130,6 +131,14 @@ def initialize_database():
             token_hash TEXT PRIMARY KEY,
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             expires BIGINT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS proposal_events (
+            id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            details TEXT NOT NULL,
+            created BIGINT NOT NULL
         )""",
     )
     with connection() as conn:
@@ -261,12 +270,17 @@ def get_document(collection, document_id):
     return document
 
 
-def put_document(collection, document_id, data):
-    db_execute(
-        """INSERT INTO collection_documents (collection, id, data, updated) VALUES (?, ?, ?, ?)
-        ON CONFLICT(collection, id) DO UPDATE SET data = excluded.data, updated = excluded.updated""",
-        (collection, document_id, json.dumps(data, ensure_ascii=False), now_ms()),
-    )
+def put_document(collection, document_id, data, event=None):
+    with connection() as conn:
+        conn.execute(adapt_sql(
+            """INSERT INTO collection_documents (collection, id, data, updated) VALUES (?, ?, ?, ?)
+            ON CONFLICT(collection, id) DO UPDATE SET data = excluded.data, updated = excluded.updated"""
+        ), (collection, document_id, json.dumps(data, ensure_ascii=False), now_ms()))
+        if event:
+            conn.execute(adapt_sql(
+                "INSERT INTO proposal_events (id, proposal_id, actor_id, action, details, created) VALUES (?, ?, ?, ?, ?, ?)"
+            ), (secrets.token_urlsafe(16), document_id, event["actor_id"], event["action"],
+                json.dumps(event["details"], ensure_ascii=False), now_ms()))
     return get_document(collection, document_id)
 
 
@@ -275,7 +289,26 @@ def visible_proposal(user, role, data):
         return True
     if role == "student":
         return data.get("sid") == user["id"]
-    return data.get("status") == "submitted" or user["id"] in data.get("reviewers", [])
+    return data.get("sid") != user["id"] and data.get("status") != "draft" and (
+        data.get("status") == "submitted" or user["id"] in data.get("reviewers", [])
+    )
+
+
+def proposal_for_viewer(data, user, role):
+    if role == "admin":
+        return data
+    result = {key: value for key, value in data.items() if key != "reviewers"}
+    reviews = data.get("reviews") or {}
+    if role == "reviewer":
+        result.pop("versions", None)
+        result["reviewers"] = [user["id"]] if user["id"] in data.get("reviewers", []) else []
+        result["reviews"] = {user["id"]: reviews[user["id"]]} if user["id"] in reviews else {}
+    else:
+        result["reviews"] = {
+            str(index): {"scores": review.get("scores", {})}
+            for index, review in enumerate(reviews.values(), 1)
+        } if data.get("decision") else {}
+    return result
 
 
 def list_documents(collection):
@@ -284,6 +317,41 @@ def list_documents(collection):
         (collection,),
     )
     return [{**row, "data": json.loads(row["data"])} for row in rows]
+
+
+def record_proposal_version(data, author_id):
+    fields = ("gid", "title", "abstract", "method", "budget", "months", "outcomes", "status")
+    previous_versions = data.get("versions", [])
+    version = {
+        "number": len(previous_versions) + 1,
+        "author_id": author_id,
+        "at": now_ms(),
+        "data": {field: data.get(field) for field in fields},
+    }
+    return {**data, "versions": [*previous_versions, version]}
+
+
+def valid_milestones(milestones, budget):
+    if not isinstance(milestones, list) or len(milestones) > 100:
+        return False
+    total = 0
+    for milestone in milestones:
+        if not isinstance(milestone, dict):
+            return False
+        amount = milestone.get("amount")
+        if type(amount) not in (int, float) or not 0 < amount <= 1e15:
+            return False
+        if not isinstance(milestone.get("title"), str) or not 1 <= len(milestone["title"].strip()) <= 160:
+            return False
+        if milestone.get("status") not in ("planned", "paid"):
+            return False
+        try:
+            date.fromisoformat(milestone["due_date"])
+            date.fromisoformat(milestone["report_due"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        total += amount
+    return type(budget) in (int, float) and total <= budget
 
 
 @app.get("/")
@@ -295,6 +363,18 @@ def index():
 @app.get("/api/health")
 def health():
     return jsonify({"ok": True, "storage": "sqlite" if IS_SQLITE else "postgres"})
+
+
+@app.get("/api/proposals/<document_id>/events")
+@authenticated
+def proposal_events(document_id):
+    if app_role(g.user) != "admin":
+        return api_error("Журнал доступен только администратору.", 403)
+    events = db_all(
+        "SELECT actor_id, action, details, created FROM proposal_events WHERE proposal_id = ? ORDER BY created, id",
+        (document_id,),
+    )
+    return jsonify({"events": [{**event, "details": json.loads(event["details"])} for event in events]})
 
 
 @app.post("/api/auth/register")
@@ -359,6 +439,7 @@ def list_collection(collection):
         documents = list_documents(collection)
         if collection == "proposals":
             documents = [item for item in documents if visible_proposal(user, role, item["data"])]
+            documents = [{**item, "data": proposal_for_viewer(item["data"], user, role)} for item in documents]
         elif collection == "files":
             proposals = list_documents("proposals")
             visible_ids = {
@@ -395,6 +476,7 @@ def set_collection_document(collection, document_id):
             data.update(id=document_id, sid=user["id"], created=now_ms(), reviewers=[], reviews={})
             if data["status"] == "submitted" and any(not data.get(key) for key in ("title", "abstract", "method", "outcomes")):
                 return api_error("Заполните все обязательные поля заявки.", 400)
+            data = record_proposal_version(data, user["id"])
         else:
             return api_error("Эксперт не может создавать заявки.", 403)
     elif collection == "files":
@@ -410,7 +492,8 @@ def set_collection_document(collection, document_id):
     else:
         return api_error("Создание этого типа записи запрещено.", 403)
 
-    put_document(collection, document_id, data)
+    event = {"actor_id": user["id"], "action": "created", "details": {"status": data.get("status")}} if collection == "proposals" else None
+    put_document(collection, document_id, data, event)
     return jsonify({"ok": True})
 
 
@@ -448,6 +531,8 @@ def update_collection_document(collection, document_id):
     if collection == "proposals":
         existing = document["data"]
         if role == "admin":
+            if "milestones" in changes and (existing.get("status") != "approved" or not valid_milestones(changes["milestones"], existing.get("budget"))):
+                return api_error("Проверьте этапы финансирования: заявка должна быть одобрена, а суммы не должны превышать бюджет.", 400)
             updated = {**existing, **changes, "id": document_id}
         elif role == "student" and existing.get("sid") == user["id"] and existing.get("status") == "draft":
             allowed = {"gid", "title", "abstract", "method", "budget", "months", "outcomes", "status", "updated"}
@@ -456,6 +541,7 @@ def update_collection_document(collection, document_id):
             updated = {**existing, **changes}
             if updated.get("status") == "submitted" and any(not updated.get(key) for key in ("title", "abstract", "method", "outcomes")):
                 return api_error("Заполните все обязательные поля заявки.", 400)
+            updated = record_proposal_version(updated, user["id"])
         elif role == "reviewer" and visible_proposal(user, role, existing):
             review = (changes.get("reviews") or {}).get(user["id"])
             scores = review.get("scores") if isinstance(review, dict) else None
@@ -465,7 +551,14 @@ def update_collection_document(collection, document_id):
             updated = {**existing, "reviews": merged_reviews, "updated": changes.get("updated", now_ms())}
         else:
             return api_error("Нет доступа изменять эту заявку.", 403)
-        put_document(collection, document_id, updated)
+        details = {}
+        for field in ("status", "reviewers", "decision", "milestones"):
+            if existing.get(field) != updated.get(field):
+                details[field] = {"before": existing.get(field), "after": updated.get(field)}
+        if role == "reviewer":
+            details["review"] = updated["reviews"][user["id"]]
+        action = "review" if role == "reviewer" else "updated"
+        put_document(collection, document_id, updated, {"actor_id": user["id"], "action": action, "details": details})
         return jsonify({"ok": True})
 
     if collection == "grants" and role == "admin":
