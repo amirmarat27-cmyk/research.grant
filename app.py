@@ -488,7 +488,7 @@ def proposal_events(document_id):
 @authenticated
 def approve_proposal_stage(document_id):
     role = app_role(g.user)
-    if role not in APPROVAL_STAGES:
+    if role not in APPROVAL_STAGES and role != "admin":
         return api_error("Для согласования необходима соответствующая роль.", 403)
     body = request.get_json(silent=True) or {}
     decision = body.get("decision")
@@ -512,27 +512,34 @@ def approve_proposal_stage(document_id):
         approvals = data.get("approvals", [])
         if data.get("status") not in ("submitted", "review") or len(approvals) >= len(APPROVAL_STAGES):
             return api_error("Заявка не находится на согласовании.", 409)
-        if role != APPROVAL_STAGES[len(approvals)]:
+        stage = APPROVAL_STAGES[len(approvals)]
+        if role != "admin" and role != stage:
             return api_error("Сначала необходимо завершить предыдущий этап.", 409)
         if not data.get("reviews"):
             return api_error("До согласования необходима хотя бы одна рецензия эксперта.", 409)
         if any(item.get("by") == g.user["id"] for item in approvals):
             return api_error("Один пользователь не может согласовать несколько этапов одной заявки.", 403)
         approved_budget = body.get("approved_budget")
-        if role == "grant_board" and decision == "approve":
+        if stage == "grant_board" and decision == "approve":
             requested_budget = data.get("budget")
             if (type(approved_budget) not in (int, float) or type(requested_budget) not in (int, float)
                     or not 0 <= approved_budget <= requested_budget):
                 return api_error("Утверждённая сумма должна быть не больше запрошенного бюджета.", 400)
             data["approved_budget"] = approved_budget
         timestamp = now_ms()
-        entry = {"stage": role, "decision": decision, "note": note.strip(), "by": g.user["id"], "at": timestamp,
-             "status_before": data.get("status")}
-        if role == "grant_board" and decision == "approve":
+        entry = {
+            "stage": stage,
+            "decision": decision,
+            "note": note.strip(),
+            "by": g.user["id"],
+            "at": timestamp,
+            "status_before": data.get("status"),
+        }
+        if stage == "grant_board" and decision == "approve":
             entry["approved_budget"] = approved_budget
         data["approvals"] = [*approvals, entry]
         data["updated"] = timestamp
-        data["status"] = "rejected" if decision == "reject" else ("approved" if role == "grant_board" else "review")
+        data["status"] = "rejected" if decision == "reject" else ("approved" if stage == "grant_board" else "review")
         entry["status_after"] = data["status"]
         if data["status"] in ("approved", "rejected"):
             data["decision"] = {"note": note.strip(), "by": g.user["id"], "at": timestamp}
