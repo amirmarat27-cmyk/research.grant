@@ -175,7 +175,7 @@ class ProposalVersionTests(unittest.TestCase):
         self.assertTrue(all("by" not in approval for approval in applicant_view["approvals"]))
         self.assertNotIn("by", applicant_view["decision"])
 
-    def test_admin_can_approve_current_stage_only_once(self):
+    def test_admin_can_approve_all_three_stages_sequentially(self):
         proposal = {"title": "Project", "abstract": "Summary", "method": "Method",
                     "budget": 100, "months": 12, "outcomes": "Results", "status": "submitted"}
         self.client.put("/api/collections/proposals/project", json={"data": proposal}, headers=self.headers)
@@ -185,12 +185,18 @@ class ProposalVersionTests(unittest.TestCase):
         review = {"scores": {criterion: 8 for criterion in app.REVIEW_CRITERIA}, "comment": "Reviewed", "rec": "Финансировать"}
         self.client.patch("/api/collections/proposals/project", json={"data": {"reviews": {expert["user"]["id"]: review}}}, headers=expert_headers)
         approval_url = "/api/proposals/project/approval"
-        approved = self.client.post(approval_url, json={"decision": "approve", "note": "Admin review"}, headers=self.admin_headers)
-        self.assertEqual(approved.status_code, 200)
-        self.assertEqual(approved.get_json()["status"], "review")
+        statuses = []
+        for stage in app.APPROVAL_STAGES:
+            payload = {"decision": "approve", "note": "Admin review"}
+            if stage == "grant_board":
+                payload["approved_budget"] = 75
+            response = self.client.post(approval_url, json=payload, headers=self.admin_headers)
+            self.assertEqual(response.status_code, 200)
+            statuses.append(response.get_json()["status"])
+        self.assertEqual(statuses, ["review", "review", "approved"])
         proposal_data = self.client.get("/api/collections/proposals", headers=self.headers).get_json()["docs"][0]["data"]
-        self.assertEqual(proposal_data["approvals"][0]["stage"], "department_head")
-        self.assertEqual(self.client.post(approval_url, json={"decision": "approve"}, headers=self.admin_headers).status_code, 403)
+        self.assertEqual([entry["stage"] for entry in proposal_data["approvals"]], list(app.APPROVAL_STAGES))
+        self.assertEqual(self.client.post(approval_url, json={"decision": "approve"}, headers=self.admin_headers).status_code, 409)
 
     def test_rejection_stops_approval_workflow(self):
         proposal = {"title": "Project", "abstract": "Summary", "method": "Method",

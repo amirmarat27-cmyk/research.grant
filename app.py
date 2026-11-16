@@ -517,7 +517,7 @@ def approve_proposal_stage(document_id):
             return api_error("Сначала необходимо завершить предыдущий этап.", 409)
         if not data.get("reviews"):
             return api_error("До согласования необходима хотя бы одна рецензия эксперта.", 409)
-        if any(item.get("by") == g.user["id"] for item in approvals):
+        if role != "admin" and any(item.get("by") == g.user["id"] for item in approvals):
             return api_error("Один пользователь не может согласовать несколько этапов одной заявки.", 403)
         approved_budget = body.get("approved_budget")
         if stage == "grant_board" and decision == "approve":
