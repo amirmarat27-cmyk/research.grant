@@ -725,7 +725,7 @@ def verify_passkey_registration():
     body = request.get_json(silent=True) or {}
     credential = body.get("credential")
     if not isinstance(credential, dict):
-        return api_error("Некорректный ответ Face ID.", 400)
+        return api_error("Некорректный ответ биометрической проверки.", 400)
     state = consume_passkey_challenge(body.get("challengeId", ""), "registration", g.user["id"])
     if state is None:
         return api_error("Срок проверки входа по биометрии истёк. Попробуйте снова.", 400)
@@ -737,7 +737,7 @@ def verify_passkey_registration():
         encoded_id = websafe_encode(credential_data.credential_id)
         encoded_data = websafe_encode(bytes(credential_data))
     except (ValueError, TypeError, KeyError, AssertionError):
-        return api_error("Не удалось проверить Face ID. Попробуйте ещё раз.", 400)
+        return api_error("Не удалось подтвердить биометрический вход. Попробуйте ещё раз.", 400)
     if db_one("SELECT credential_id FROM passkey_credentials WHERE credential_id = ?", (encoded_id,)):
         return api_error("Это устройство уже привязано к аккаунту.", 409)
     db_execute(
@@ -761,25 +761,25 @@ def verify_passkey_authentication():
     body = request.get_json(silent=True) or {}
     credential = body.get("credential")
     if not isinstance(credential, dict) or not isinstance(credential.get("rawId"), str):
-        return api_error("Некорректный ответ Face ID.", 400)
+        return api_error("Некорректный ответ биометрической проверки.", 400)
     state = consume_passkey_challenge(body.get("challengeId", ""), "authentication")
     if state is None:
         return api_error("Срок проверки входа по биометрии истёк. Попробуйте снова.", 401)
     try:
         encoded_id = websafe_encode(websafe_decode(credential["rawId"]))
     except (ValueError, TypeError):
-        return api_error("Не удалось проверить Face ID.", 401)
+        return api_error("Не удалось подтвердить биометрический вход.", 401)
     stored = db_one(
         "SELECT user_id, credential_data FROM passkey_credentials WHERE credential_id = ?",
         (encoded_id,),
     )
     if stored is None:
-        return api_error("Face ID не настроен для этого аккаунта. Войдите по паролю и подключите Face ID.", 401)
+        return api_error("Биометрический вход не настроен для этого аккаунта. Войдите по паролю и подключите его.", 401)
     try:
         authenticator = AttestedCredentialData(websafe_decode(stored["credential_data"]))
         PASSKEY_SERVER.authenticate_complete(state, [authenticator], credential)
     except (ValueError, TypeError, KeyError, AssertionError):
-        return api_error("Не удалось проверить Face ID.", 401)
+        return api_error("Не удалось подтвердить биометрический вход.", 401)
     user = user_record(db_one("SELECT * FROM users WHERE id = ?", (stored["user_id"],)))
     if user is None:
         return api_error("Аккаунт не найден.", 401)
