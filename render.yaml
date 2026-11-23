@@ -14,4 +14,4 @@ services:
       - key: DOCUMENT_ENCRYPTION_KEY
         sync: false
       - key: ALLOWED_ORIGINS
-        value: https://amirmarat27-cmyk.github.io,http://127.0.0.1:8000,http://localhost:8000
+        value: https://amirmarat27-cmyk.github.io,http://127.0.0.1:8000,http://localhost:8000,http://127.0.0.1:8001,http://localhost:8001

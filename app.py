@@ -41,7 +41,6 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://", 1)
 IS_SQLITE = DATABASE_URL.startswith("sqlite:///")
-
 app = Flask(__name__, static_folder=None)
 app.config.update(
     MAX_CONTENT_LENGTH=2 * 1024 * 1024,
@@ -154,6 +153,8 @@ def initialize_database():
         )""",
     )
     with connection() as conn:
+        conn.execute(adapt_sql("DROP TABLE IF EXISTS webauthn_challenges"))
+        conn.execute(adapt_sql("DROP TABLE IF EXISTS webauthn_credentials"))
         conn.execute(adapt_sql("DROP TABLE IF EXISTS passkey_challenges"))
         conn.execute(adapt_sql("DROP TABLE IF EXISTS passkey_credentials"))
         for statement in statements:
