@@ -285,6 +285,29 @@ class ProposalVersionTests(unittest.TestCase):
         self.assertEqual(self.client.patch("/api/collections/proposals/own", json={"data": {"status": "review"}}, headers=self.admin_headers).status_code, 403)
         self.assertEqual(self.client.get("/api/proposals/own/events", headers=self.admin_headers).status_code, 403)
 
+    def test_passkey_registration_requires_login_and_requests_platform_verification(self):
+        endpoint = "/api/auth/passkeys/registration/options"
+        self.assertEqual(self.client.post(endpoint).status_code, 401)
+        response = self.client.post(endpoint, headers=self.admin_headers)
+        self.assertEqual(response.status_code, 200)
+        options = response.get_json()
+        self.assertEqual(options["publicKey"]["authenticatorSelection"]["authenticatorAttachment"], "platform")
+        self.assertEqual(options["publicKey"]["authenticatorSelection"]["residentKey"], "required")
+        self.assertEqual(options["publicKey"]["authenticatorSelection"]["userVerification"], "required")
+        self.assertTrue(options["challengeId"])
+
+    def test_passkey_login_options_are_discoverable_and_invalid_credentials_fail(self):
+        endpoint = "/api/auth/passkeys/authentication/options"
+        response = self.client.post(endpoint)
+        self.assertEqual(response.status_code, 200)
+        options = response.get_json()
+        self.assertFalse(options["publicKey"].get("allowCredentials"))
+        invalid = self.client.post("/api/auth/passkeys/authentication/verify", json={
+            "challengeId": options["challengeId"],
+            "credential": {"rawId": "ZmFrZQ", "id": "ZmFrZQ", "type": "public-key", "response": {}},
+        })
+        self.assertEqual(invalid.status_code, 401)
+
 
 if __name__ == "__main__":
     unittest.main()
