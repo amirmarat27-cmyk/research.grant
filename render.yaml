@@ -13,9 +13,5 @@ services:
         sync: false
       - key: DOCUMENT_ENCRYPTION_KEY
         sync: false
-      - key: WEBAUTHN_RP_ID
-        value: amirmarat27-cmyk.github.io
-      - key: WEBAUTHN_ORIGINS
-        value: https://amirmarat27-cmyk.github.io
       - key: ALLOWED_ORIGINS
         value: https://amirmarat27-cmyk.github.io,http://127.0.0.1:8000,http://localhost:8000

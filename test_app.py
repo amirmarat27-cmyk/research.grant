@@ -285,28 +285,18 @@ class ProposalVersionTests(unittest.TestCase):
         self.assertEqual(self.client.patch("/api/collections/proposals/own", json={"data": {"status": "review"}}, headers=self.admin_headers).status_code, 403)
         self.assertEqual(self.client.get("/api/proposals/own/events", headers=self.admin_headers).status_code, 403)
 
-    def test_passkey_registration_requires_login_and_requests_platform_verification(self):
-        endpoint = "/api/auth/passkeys/registration/options"
-        self.assertEqual(self.client.post(endpoint).status_code, 401)
-        response = self.client.post(endpoint, headers=self.admin_headers)
-        self.assertEqual(response.status_code, 200)
-        options = response.get_json()
-        self.assertEqual(options["publicKey"]["authenticatorSelection"]["authenticatorAttachment"], "platform")
-        self.assertEqual(options["publicKey"]["authenticatorSelection"]["residentKey"], "required")
-        self.assertEqual(options["publicKey"]["authenticatorSelection"]["userVerification"], "required")
-        self.assertTrue(options["challengeId"])
+    def test_initialization_removes_only_legacy_passkey_tables(self):
+        with app.connection() as conn:
+            conn.execute("CREATE TABLE passkey_credentials (credential_id TEXT PRIMARY KEY, user_id TEXT, credential_data TEXT, created BIGINT)")
+            conn.execute("CREATE TABLE passkey_challenges (id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT, challenge TEXT, expires BIGINT)")
+            conn.execute("INSERT INTO passkey_credentials VALUES ('credential', ?, 'data', 1)", (self.student_id,))
+            conn.execute("INSERT INTO passkey_challenges VALUES ('challenge', ?, 'login', 'data', 1)", (self.student_id,))
 
-    def test_passkey_login_options_are_discoverable_and_invalid_credentials_fail(self):
-        endpoint = "/api/auth/passkeys/authentication/options"
-        response = self.client.post(endpoint)
-        self.assertEqual(response.status_code, 200)
-        options = response.get_json()
-        self.assertFalse(options["publicKey"].get("allowCredentials"))
-        invalid = self.client.post("/api/auth/passkeys/authentication/verify", json={
-            "challengeId": options["challengeId"],
-            "credential": {"rawId": "ZmFrZQ", "id": "ZmFrZQ", "type": "public-key", "response": {}},
-        })
-        self.assertEqual(invalid.status_code, 401)
+        app.initialize_database()
+
+        self.assertIsNone(app.db_one("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'passkey_credentials'"))
+        self.assertIsNone(app.db_one("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'passkey_challenges'"))
+        self.assertEqual(app.db_one("SELECT COUNT(*) AS count FROM users")["count"], 2)
 
 
 if __name__ == "__main__":

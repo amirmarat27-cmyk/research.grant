@@ -19,17 +19,6 @@ from urllib.parse import quote
 from flask import Flask, g, jsonify, request, send_from_directory
 from flask_cors import CORS
 from cryptography.fernet import Fernet, InvalidToken
-from fido2.server import Fido2Server
-from fido2.utils import websafe_decode, websafe_encode
-from fido2.webauthn import (
-    AttestedCredentialData,
-    AuthenticatorAttachment,
-    PublicKeyCredentialDescriptor,
-    PublicKeyCredentialRpEntity,
-    PublicKeyCredentialUserEntity,
-    ResidentKeyRequirement,
-    UserVerificationRequirement,
-)
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -52,22 +41,6 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://", 1)
 IS_SQLITE = DATABASE_URL.startswith("sqlite:///")
-WEBAUTHN_RP_ID = os.environ.get(
-    "WEBAUTHN_RP_ID", "localhost" if IS_SQLITE else "amirmarat27-cmyk.github.io"
-)
-WEBAUTHN_ORIGINS = tuple(
-    origin.strip()
-    for origin in os.environ.get(
-        "WEBAUTHN_ORIGINS",
-        "http://localhost:8000,http://localhost:8001"
-        if IS_SQLITE else "https://amirmarat27-cmyk.github.io",
-    ).split(",")
-    if origin.strip()
-)
-PASSKEY_SERVER = Fido2Server(
-    PublicKeyCredentialRpEntity(name="Research Grant", id=WEBAUTHN_RP_ID),
-    verify_origin=lambda origin: origin in WEBAUTHN_ORIGINS,
-)
 
 app = Flask(__name__, static_folder=None)
 app.config.update(
@@ -179,21 +152,10 @@ def initialize_database():
             user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
             applicant_type TEXT NOT NULL
         )""",
-        """CREATE TABLE IF NOT EXISTS passkey_credentials (
-            credential_id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            credential_data TEXT NOT NULL,
-            created BIGINT NOT NULL
-        )""",
-        """CREATE TABLE IF NOT EXISTS passkey_challenges (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            purpose TEXT NOT NULL,
-            challenge TEXT NOT NULL,
-            expires BIGINT NOT NULL
-        )""",
     )
     with connection() as conn:
+        conn.execute(adapt_sql("DROP TABLE IF EXISTS passkey_challenges"))
+        conn.execute(adapt_sql("DROP TABLE IF EXISTS passkey_credentials"))
         for statement in statements:
             conn.execute(statement)
 
@@ -331,33 +293,6 @@ def issue_token(user):
 
 def auth_result(user):
     return jsonify({"token": issue_token(user), "user": user_data(user, user)})
-
-
-def store_passkey_challenge(purpose, challenge, user_id=None):
-    timestamp = now_ms()
-    db_execute("DELETE FROM passkey_challenges WHERE expires <= ?", (timestamp,))
-    challenge_id = secrets.token_urlsafe(24)
-    db_execute(
-        "INSERT INTO passkey_challenges (id, user_id, purpose, challenge, expires) VALUES (?, ?, ?, ?, ?)",
-        (challenge_id, user_id, purpose, challenge, timestamp + 5 * 60 * 1000),
-    )
-    return challenge_id
-
-
-def consume_passkey_challenge(challenge_id, purpose, user_id=None):
-    with connection() as conn:
-        if IS_SQLITE:
-            conn.execute("BEGIN IMMEDIATE")
-        query = "SELECT user_id, purpose, challenge, expires FROM passkey_challenges WHERE id = ?"
-        if not IS_SQLITE:
-            query += " FOR UPDATE"
-        row = conn.execute(adapt_sql(query), (challenge_id,)).fetchone()
-        if row is None:
-            return None
-        conn.execute(adapt_sql("DELETE FROM passkey_challenges WHERE id = ?"), (challenge_id,))
-        if row["expires"] <= now_ms() or row["purpose"] != purpose or row["user_id"] != user_id:
-            return None
-        return {"challenge": row["challenge"], "user_verification": UserVerificationRequirement.REQUIRED}
 
 
 def get_document(collection, document_id):
@@ -695,94 +630,6 @@ def login():
     user = user_record(db_one("SELECT * FROM users WHERE email = ?", (email,)))
     if user is None or not check_password_hash(user["password_hash"], password):
         return api_error("Неверная почта или пароль.", 401)
-    return auth_result(user)
-
-
-@app.post("/api/auth/passkeys/registration/options")
-@authenticated
-def passkey_registration_options():
-    user = g.user
-    existing_credentials = [
-        PublicKeyCredentialDescriptor(id=websafe_decode(row["credential_id"]))
-        for row in db_all("SELECT credential_id FROM passkey_credentials WHERE user_id = ?", (user["id"],))
-    ]
-    options, state = PASSKEY_SERVER.register_begin(
-        PublicKeyCredentialUserEntity(
-            id=user["id"].encode("utf-8"), name=user["email"], display_name=user["name"]
-        ),
-        credentials=existing_credentials,
-        resident_key_requirement=ResidentKeyRequirement.REQUIRED,
-        user_verification=UserVerificationRequirement.REQUIRED,
-        authenticator_attachment=AuthenticatorAttachment.PLATFORM,
-    )
-    challenge_id = store_passkey_challenge("registration", state["challenge"], user["id"])
-    return jsonify({"challengeId": challenge_id, "publicKey": dict(options)["publicKey"]})
-
-
-@app.post("/api/auth/passkeys/registration/verify")
-@authenticated
-def verify_passkey_registration():
-    body = request.get_json(silent=True) or {}
-    credential = body.get("credential")
-    if not isinstance(credential, dict):
-        return api_error("Некорректный ответ биометрической проверки.", 400)
-    state = consume_passkey_challenge(body.get("challengeId", ""), "registration", g.user["id"])
-    if state is None:
-        return api_error("Срок проверки входа по биометрии истёк. Попробуйте снова.", 400)
-    try:
-        authenticator_data = PASSKEY_SERVER.register_complete(state, credential)
-        credential_data = authenticator_data.credential_data
-        if credential_data is None or not authenticator_data.is_user_verified():
-            return api_error("Устройство не подтвердило пользователя.", 400)
-        encoded_id = websafe_encode(credential_data.credential_id)
-        encoded_data = websafe_encode(bytes(credential_data))
-    except (ValueError, TypeError, KeyError, AssertionError):
-        return api_error("Не удалось подтвердить биометрический вход. Попробуйте ещё раз.", 400)
-    if db_one("SELECT credential_id FROM passkey_credentials WHERE credential_id = ?", (encoded_id,)):
-        return api_error("Это устройство уже привязано к аккаунту.", 409)
-    db_execute(
-        "INSERT INTO passkey_credentials (credential_id, user_id, credential_data, created) VALUES (?, ?, ?, ?)",
-        (encoded_id, g.user["id"], encoded_data, now_ms()),
-    )
-    return jsonify({"ok": True}), 201
-
-
-@app.post("/api/auth/passkeys/authentication/options")
-def passkey_authentication_options():
-    options, state = PASSKEY_SERVER.authenticate_begin(
-        user_verification=UserVerificationRequirement.REQUIRED
-    )
-    challenge_id = store_passkey_challenge("authentication", state["challenge"])
-    return jsonify({"challengeId": challenge_id, "publicKey": dict(options)["publicKey"]})
-
-
-@app.post("/api/auth/passkeys/authentication/verify")
-def verify_passkey_authentication():
-    body = request.get_json(silent=True) or {}
-    credential = body.get("credential")
-    if not isinstance(credential, dict) or not isinstance(credential.get("rawId"), str):
-        return api_error("Некорректный ответ биометрической проверки.", 400)
-    state = consume_passkey_challenge(body.get("challengeId", ""), "authentication")
-    if state is None:
-        return api_error("Срок проверки входа по биометрии истёк. Попробуйте снова.", 401)
-    try:
-        encoded_id = websafe_encode(websafe_decode(credential["rawId"]))
-    except (ValueError, TypeError):
-        return api_error("Не удалось подтвердить биометрический вход.", 401)
-    stored = db_one(
-        "SELECT user_id, credential_data FROM passkey_credentials WHERE credential_id = ?",
-        (encoded_id,),
-    )
-    if stored is None:
-        return api_error("Биометрический вход не настроен для этого аккаунта. Войдите по паролю и подключите его.", 401)
-    try:
-        authenticator = AttestedCredentialData(websafe_decode(stored["credential_data"]))
-        PASSKEY_SERVER.authenticate_complete(state, [authenticator], credential)
-    except (ValueError, TypeError, KeyError, AssertionError):
-        return api_error("Не удалось подтвердить биометрический вход.", 401)
-    user = user_record(db_one("SELECT * FROM users WHERE id = ?", (stored["user_id"],)))
-    if user is None:
-        return api_error("Аккаунт не найден.", 401)
     return auth_result(user)
 
 
